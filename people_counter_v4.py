@@ -1,14 +1,3 @@
-# USAGE
-# To read and write back out to video:
-# python people_counter.py --prototxt mobilenet_ssd/MobileNetSSD_deploy.prototxt \
-#	--model mobilenet_ssd/MobileNetSSD_deploy.caffemodel --input videos/example_01.mp4 \
-#	--output output/output_01.avi
-#
-# To read from webcam and write back out to disk:
-# python people_counter.py --prototxt mobilenet_ssd/MobileNetSSD_deploy.prototxt \
-#	--model mobilenet_ssd/MobileNetSSD_deploy.caffemodel \
-#	--output output/webcam_output.avi
-
 # import the necessary packages
 from multiprocessing import Process, Array
 from pyimagesearch.centroidtracker import CentroidTracker
@@ -18,6 +7,7 @@ from flask import Flask, render_template, Response
 from imutils.video import VideoStream
 from imutils.video import FPS
 from dotenv import load_dotenv
+import sys
 import os
 import numpy as np
 import argparse
@@ -120,8 +110,6 @@ class Camara:
 		callPostThread.start()
 
 		# Sending post request and saving response as response object.
-		if self.data["cantidad"] != 0 :
-			requests.post(Camara.API_ENDPOINT, json=self.data)
 
 	def callFps(self):	
 		if self.fps != None:
@@ -378,29 +366,33 @@ def index():
 
 if __name__ == '__main__':
   
-	refI = 0
-	refE = 0
-	for location in inputSources:
+	def startCamarasProcessing():
 		refI = 0
-		for camara in inputSources[location]["camaras"]:
-			cap = cv2.VideoCapture(camara["src"])
-			ret, frame = cap.read()
-			frame = imutils.resize(frame, width=500)
-			inputShapes.append(frame.shape)
-			cap.release()
+		refE = 0
+		for location in inputSources:
+			refI = 0
+			for camara in inputSources[location]["camaras"]:
+				cap = cv2.VideoCapture(camara["src"])
+				ret, frame = cap.read()
+				frame = imutils.resize(frame, width=500)
+				inputShapes.append(frame.shape)
+				cap.release()
 
-			inputFrames.append(Array(ctypes.c_uint8, inputShapes[-1][0] * inputShapes[-1][1] * inputShapes[-1][2], lock=False))
-			processReference.append(Process(target=Camara, args=(refE, camara["src"], args, inputFrames[-1], inputShapes[-1])))
-			processReference[-1].start()
+				inputFrames.append(Array(ctypes.c_uint8, inputShapes[-1][0] * inputShapes[-1][1] * inputShapes[-1][2], lock=False))
+				processReference.append(Process(target=Camara, args=(refE, camara["src"], args, inputFrames[-1], inputShapes[-1])))
+				processReference[-1].start()
 
-			camara["refI"] = refI
-			camara["refE"] = refE
-			refI += 1
-			refE += 1
-
+				camara["refI"] = refI
+				camara["refE"] = refE
+				refI += 1
+				refE += 1
+	try:
+		startCamarasProcessing()
+	except KeyboardInterrupt:
+		sys.exit()
+	
 	from waitress import serve
 
 	app.debug=True
 	app.use_reloader=False
 	serve(app, host="0.0.0.0", port=8080)
-	print("Server 0.0.0.0:8080")	
