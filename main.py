@@ -25,16 +25,18 @@ import ctypes
 import math
 import socketio
 import socket
+from ultralytics import YOLO
 
 ARGS= {
-	"CAMARAIDS": [8],
-	"BACK_ENDPOINT": ["http://sems.back.ngrok.io/", "http://localhost:3001/"][0],
-	"NGROK_AVAILABLE": True,
+	"CAMARAIDS": [7], # 4: Test .1.64, 8: ngrokTcp, 6: VideoE, 7: VideoC
+	"BACK_ENDPOINT": ["http://sems.back.ngrok.io/", "http://localhost:3001/"][1],
+	"NGROK_AVAILABLE": False,
 	"GPU_AVAILABLE": True,
-	"FORWARD_CAMERA": False,
-	"VERBOSE": False,
-	"CONFIDENCE": 0.3,
+	"FORWARD_CAMERA": True,
+	"VERBOSE": True,
+	"CONFIDENCE": 0.35,
 	"SKIP_FRAMES": 25,
+	"YOLOV8": True,
 }
 
 app = Flask(__name__)
@@ -99,7 +101,7 @@ class SocketIOProcess:
 			if self.args["NGROK_AVAILABLE"] and self.args["FORWARD_CAMERA"]:
 				endpoint = 'http://sems.ngrok.io/camara/'
 			elif self.args["FORWARD_CAMERA"]:	
-				endpoint = 'http://' + socket.getfqdn() + ':8080/camara/'
+				endpoint = 'http://' + socket.getfqdn() + ':3001/camara/'
 			else:
 				endpoint = ''
 
@@ -187,16 +189,19 @@ class CamaraProcessing:
 		self.args = args
 
 		# Load Model
-		self.net = cv2.dnn.readNetFromDarknet('models/people/yolov3.cfg', 'models/people/yolov3.weights')
-		if self.args["GPU_AVAILABLE"]:
-			# set CUDA as the preferable backend and target
-			print("[INFO] setting preferable backend and target to CUDA...")
-			self.net.setPreferableBackend(cv2.dnn.DNN_BACKEND_CUDA)
-			self.net.setPreferableTarget(cv2.dnn.DNN_TARGET_CUDA)
+		if self.args["YOLOV8"]:
+			self.net = YOLO("yolov8n.pt")
+		else:
+			self.net = cv2.dnn.readNetFromDarknet('models/people/yolov3.cfg', 'models/people/yolov3.weights')
+			if self.args["GPU_AVAILABLE"]:
+				# set CUDA as the preferable backend and target
+				print("[INFO] setting preferable backend and target to CUDA...")
+				self.net.setPreferableBackend(cv2.dnn.DNN_BACKEND_CUDA)
+				self.net.setPreferableTarget(cv2.dnn.DNN_TARGET_CUDA)
 
-		# Get the output layer names of the model
-		self.layer_names = self.net.getLayerNames()
-		self.layer_names = [self.layer_names[i[0] - 1] for i in self.net.getUnconnectedOutLayers()]
+			# Get the output layer names of the model
+			self.layer_names = self.net.getLayerNames()
+			self.layer_names = [self.layer_names[i[0] - 1] for i in self.net.getUnconnectedOutLayers()]
 
 		# initialize the video writer (we'll instantiate later if need be)
 		self.writer = None
@@ -377,6 +382,24 @@ class CamaraProcessing:
 						classids.append(classid)
 
 		return boxes, confidences, classids
+	
+	def generate_boxes_confidences_classids_v8(self, outs, threshold):
+		boxes = []
+		confidences = []
+		classids = []
+
+		for out in outs:
+				for box in out.boxes:
+					x1, y1, x2, y2 = [round(x) for x in box.xyxy[0].tolist()]
+					class_id = box.cls[0].item()
+					prob = round(box.conf[0].item(), 2)
+					if prob > threshold:
+						# Append to list
+						boxes.append([x1, y1, x2-x1, y2-y1])
+						confidences.append(float(prob))
+						classids.append(class_id)
+	
+		return boxes, confidences, classids
 
 	def is_in_valid_area(self, box):
 		startX, startY, width, height = box
@@ -421,15 +444,21 @@ class CamaraProcessing:
 				# convert the frame to a blob and pass the blob through the
 				# network and obtain the detections
 				blob = cv2.dnn.blobFromImage(frame, 1/255.0, (416, 416), swapRB=True, crop=False)
-				self.net.setInput(blob)
 				
 				start = time.time()
-				detections = self.net.forward(self.layer_names)
+				if self.args["YOLOV8"]:
+					detections = self.net.predict(frame)
+				else:
+					self.net.setInput(blob)
+					detections = self.net.forward(self.layer_names)
 				end = time.time()
 				if self.args["VERBOSE"]:
 					print ("[INFO] YOLOv3 took {:6f} seconds".format(end - start))
 
-				boxes, confidences, classids = self.generate_boxes_confidences_classids(detections, self.args["CONFIDENCE"])
+				if self.args["YOLOV8"]:
+					boxes, confidences, classids = self.generate_boxes_confidences_classids_v8(detections, self.args["CONFIDENCE"])
+				else:
+					boxes, confidences, classids = self.generate_boxes_confidences_classids(detections, self.args["CONFIDENCE"])
 
 				idxs = cv2.dnn.NMSBoxes(boxes, confidences, self.args["CONFIDENCE"], self.NMS_THRESH)
 
