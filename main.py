@@ -16,7 +16,6 @@ import numpy as np
 import argparse
 import imutils
 import time
-import dlib
 import cv2
 import requests
 import threading
@@ -26,15 +25,17 @@ import math
 import socketio
 import socket
 
+
 ARGS= {
-	"CAMARAIDS": [8],
-	"BACK_ENDPOINT": ["http://sems.back.ngrok.io/", "http://localhost:3001/"][0],
-	"NGROK_AVAILABLE": True,
+	"CAMARAIDS": [8], # 4: Test .1.64, 8: ngrokTcp, 6: VideoE, 7: VideoC
+	"BACK_ENDPOINT": ["http://sems.gback.ngrok.io/", "http://localhost:3001/"][0],
+	"NGROK_AVAILABLE": False,
 	"GPU_AVAILABLE": True,
-	"FORWARD_CAMERA": False,
-	"VERBOSE": False,
-	"CONFIDENCE": 0.3,
+	"FORWARD_CAMERA": True,
+	"VERBOSE": True,
+	"CONFIDENCE": 0.35,
 	"SKIP_FRAMES": 25,
+	"YOLOV8": True,
 }
 
 app = Flask(__name__)
@@ -186,17 +187,25 @@ class CamaraProcessing:
 		self.socketManager.setCamaraURL(self.id)
 		self.args = args
 
+		from ultralytics import YOLO
 		# Load Model
-		self.net = cv2.dnn.readNetFromDarknet('models/people/yolov3.cfg', 'models/people/yolov3.weights')
-		if self.args["GPU_AVAILABLE"]:
-			# set CUDA as the preferable backend and target
-			print("[INFO] setting preferable backend and target to CUDA...")
-			self.net.setPreferableBackend(cv2.dnn.DNN_BACKEND_CUDA)
-			self.net.setPreferableTarget(cv2.dnn.DNN_TARGET_CUDA)
+		if self.args["YOLOV8"]:
+			print("[INFO] Loading YOLOv8 model")
+			self.net = YOLO("yolov8n.pt")
+			# Warmup
+			self.yolov8_warmup(self.net)
+			print("[INFO] YOLOv8 model loaded")
+		else:
+			self.net = cv2.dnn.readNetFromDarknet('models/people/yolov3.cfg', 'models/people/yolov3.weights')
+			if self.args["GPU_AVAILABLE"]:
+				# set CUDA as the preferable backend and target
+				print("[INFO] setting preferable backend and target to CUDA...")
+				self.net.setPreferableBackend(cv2.dnn.DNN_BACKEND_CUDA)
+				self.net.setPreferableTarget(cv2.dnn.DNN_TARGET_CUDA)
 
-		# Get the output layer names of the model
-		self.layer_names = self.net.getLayerNames()
-		self.layer_names = [self.layer_names[i[0] - 1] for i in self.net.getUnconnectedOutLayers()]
+			# Get the output layer names of the model
+			self.layer_names = self.net.getLayerNames()
+			self.layer_names = [self.layer_names[i[0] - 1] for i in self.net.getUnconnectedOutLayers()]
 
 		# initialize the video writer (we'll instantiate later if need be)
 		self.writer = None
@@ -377,6 +386,24 @@ class CamaraProcessing:
 						classids.append(classid)
 
 		return boxes, confidences, classids
+	
+	def generate_boxes_confidences_classids_v8(self, outs, threshold):
+		boxes = []
+		confidences = []
+		classids = []
+
+		for out in outs:
+				for box in out.boxes:
+					x1, y1, x2, y2 = [round(x) for x in box.xyxy[0].tolist()]
+					class_id = box.cls[0].item()
+					prob = round(box.conf[0].item(), 2)
+					if prob > threshold:
+						# Append to list
+						boxes.append([x1, y1, x2-x1, y2-y1])
+						confidences.append(float(prob))
+						classids.append(class_id)
+	
+		return boxes, confidences, classids
 
 	def is_in_valid_area(self, box):
 		startX, startY, width, height = box
@@ -385,9 +412,18 @@ class CamaraProcessing:
 			return centroid[0] < self.W // 2
 		return True
 
+	def yolov8_warmup(self, model):
+    # Warmup model
+		startTime = time.time()
+		warmupFrame = cv2.imread("yoloWarmUp.png")
+		warmupFrame = imutils.resize(warmupFrame, height=360)
+		model.predict(source=warmupFrame, verbose=False)
+		if self.args["VERBOSE"]:
+			print(f"Model warmed up in {time.time() - startTime} seconds")
+		
 	def gen_frames(self, inputFrame_, outputFrame_, flag):
 		# Loop over frames from the video stream.
-
+		import dlib
 		while True:
 			# Counter for social distance violations.
 			self.totalDistanceViolations = 0
@@ -395,6 +431,7 @@ class CamaraProcessing:
 			# Grab the next frame if available.
 			while(not flag.value):
 				pass
+			print("Frame received")
 			flag.value = False
 			frame[:] = inputFrame_
 
@@ -414,6 +451,8 @@ class CamaraProcessing:
 			# check to see if we should run a more computationally expensive
 			# object detection method to aid our tracker
 			if self.totalFrames == 0:
+				start = time.time()
+				print("detection started...")
 				# set the status and initialize our new set of object trackers
 				self.status = "Detecting"
 				self.trackers = []
@@ -421,15 +460,21 @@ class CamaraProcessing:
 				# convert the frame to a blob and pass the blob through the
 				# network and obtain the detections
 				blob = cv2.dnn.blobFromImage(frame, 1/255.0, (416, 416), swapRB=True, crop=False)
-				self.net.setInput(blob)
 				
 				start = time.time()
-				detections = self.net.forward(self.layer_names)
+				if self.args["YOLOV8"]:
+					detections = self.net.predict(frame, verbose=False)
+				else:
+					self.net.setInput(blob)
+					detections = self.net.forward(self.layer_names)
 				end = time.time()
 				if self.args["VERBOSE"]:
-					print ("[INFO] YOLOv3 took {:6f} seconds".format(end - start))
+					print ("[INFO] Detection took {:6f} seconds".format(end - start))
 
-				boxes, confidences, classids = self.generate_boxes_confidences_classids(detections, self.args["CONFIDENCE"])
+				if self.args["YOLOV8"]:
+					boxes, confidences, classids = self.generate_boxes_confidences_classids_v8(detections, self.args["CONFIDENCE"])
+				else:
+					boxes, confidences, classids = self.generate_boxes_confidences_classids(detections, self.args["CONFIDENCE"])
 
 				idxs = cv2.dnn.NMSBoxes(boxes, confidences, self.args["CONFIDENCE"], self.NMS_THRESH)
 
@@ -448,7 +493,7 @@ class CamaraProcessing:
 								# detections list
 								idx = int(classids[i])
 
-								# if the class label is not a person, ignore it
+								# if the class label is not a person or a car, ignore it
 								if CamaraProcessing.CLASSES[idx] != "person":
 									continue
 
@@ -467,10 +512,13 @@ class CamaraProcessing:
 								# add the tracker to our list of trackers so we can
 								# utilize it during skip frames
 								self.trackers.append(tracker)
+				print(f"Detection ended in time {time.time()-start}")
 
 			# otherwise, we should utilize our object *trackers* rather than
 			# object *detectors* to obtain a higher frame processing throughput
 			else:
+				start = time.time()
+				print("Tracker started")
 				# loop over the trackers
 				for tracker in self.trackers:
 					# set the status of our system to be 'tracking' rather
@@ -489,6 +537,7 @@ class CamaraProcessing:
 
 					# add the bounding box coordinates to the rectangles list
 					rects.append((startX, startY, endX, endY))
+				print(f"Tracker ended in {time.time()-start}")
 
 			# draw a horizontal line in the center of the frame -- once an
 			# object crosses this line we will determine whether they were
@@ -620,6 +669,7 @@ def getManager():
 	return m
 
 if __name__ == '__main__':
+	#mp.set_start_method('spawn')
 	# Initialize Socket Manager.
 	manager = getManager()
 	socketManager = manager.socketManager(ARGS)

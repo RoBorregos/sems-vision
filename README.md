@@ -72,3 +72,7 @@ Requirements:
 Run main.py
 
 Open localhost:8080, all camaras should be displayed overthere.
+
+## Run on nvidia jetson nano
+Run docker
+sudo docker run -it --rm --runtime nvidia --network host -e DISPLAY=$DISPLAY -e LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libgomp.so.1 -v /tmp/.X11-unix/:/tmp/.X11-unix $(pwd):/usr/src/app yolov5
